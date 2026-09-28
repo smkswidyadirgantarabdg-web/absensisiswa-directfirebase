@@ -141,7 +141,25 @@ async function requireRole(roles){
   if(!roles.map(String).map(x=>x.toLowerCase()).includes(r)) throw new Error('Akses ditolak.');
   return x;
 }
-async function getStudents(){return (await fbGet(`${FB_ROOT}/shared/students`))||{};}
+async function getStudents(){
+  // Struktur database Anda menempatkan data siswa langsung di ROOT,
+  // dengan NISN sebagai key, sedangkan profil User UID berada di
+  // schools/SMKWD/security/users. Ambil hanya key numerik agar node
+  // seperti 'schools' tidak dianggap sebagai data siswa.
+  try{
+    const root=await fbGet('');
+    if(root && typeof root==='object'){
+      const students={};
+      for(const [key,val] of Object.entries(root)){
+        if(/^\d{6,20}$/.test(String(key)) && val && typeof val==='object'){
+          students[key]=val;
+        }
+      }
+      if(Object.keys(students).length) return students;
+    }
+  }catch(_){ /* fallback ke struktur lama */ }
+  return (await fbGet(`${FB_ROOT}/shared/students`))||{};
+}
 async function getAttendance(){return (await fbGet(`${FB_ROOT}/apps/absensi_siswa/attendance`))||{};}
 async function getConfig(){
   const appCfg=(await fbGet(`${FB_ROOT}/apps/absensi_siswa/config`))||{};
@@ -170,7 +188,10 @@ async function directLogin(username,password,nisn){
 
     let student;
     try{
-      student=await fbGet(`${FB_ROOT}/shared/students/${fbKey(id)}`);
+      // Database aktual: NISN berada langsung di ROOT.
+      // Fallback tetap disediakan untuk struktur lama schools/SMKWD/shared/students.
+      student=await fbGet(fbKey(id));
+      if(!student) student=await fbGet(`${FB_ROOT}/shared/students/${fbKey(id)}`);
     }catch(e){
       return {success:false,message:`Tidak dapat membaca data siswa dari Firebase: ${fbErr(e)}`};
     }
@@ -314,8 +335,8 @@ async function addGuru(token,username,password,kelas){await requireRole(['admin'
 async function updateGuru(token,oldUsername,username,password,kelas){await requireRole(['admin']);const teachers=await fbGet(`${FB_ROOT}/shared/teachers`)||{};const hit=Object.entries(teachers).find(([,x])=>String(x.username||x.idGuru||'').toLowerCase()===String(oldUsername).toLowerCase());if(hit){await fbUpdate({[`${FB_ROOT}/shared/teachers/${fbKey(hit[0])}/username`]:username,[`${FB_ROOT}/shared/teachers/${fbKey(hit[0])}/kelas`]:kelas||''});}return {success:true,message:'Data guru diperbarui.'};}
 async function deleteGuru(token,username){await requireRole(['admin']);const users=(await fbGet(`${FB_ROOT}/security/users`))||{};const hit=Object.entries(users).find(([,x])=>String(x?.username||'').toLowerCase()===String(username).toLowerCase());if(hit)await fbRemove(`${FB_ROOT}/security/users/${fbKey(hit[0])}`);return {success:true,message:'Profil guru dihapus. Penghapusan akun Authentication memerlukan Admin SDK.'};}
 
-async function addSiswa(token,data){await requireRole(['admin']);const d=Object.assign({},data,{nisn:String(data.nisn).trim()});if(!d.nisn||!d.nama)return {success:false,message:'Nama dan NISN wajib diisi.'};await fbSet(`${FB_ROOT}/shared/students/${fbKey(d.nisn)}`,d);return {success:true,message:'Siswa berhasil ditambahkan.'};}
-async function updateSiswa(token,oldNisn,data){await requireRole(['admin']);const old=String(oldNisn).trim(), d=Object.assign({},data,{nisn:String(data.nisn||old).trim()});if(old!==d.nisn){await fbSet(`${FB_ROOT}/shared/students/${fbKey(d.nisn)}`,d);await fbRemove(`${FB_ROOT}/shared/students/${fbKey(old)}`);}else await fbSet(`${FB_ROOT}/shared/students/${fbKey(old)}`,d);return {success:true,message:'Data siswa berhasil diperbarui.'};}
+async function addSiswa(token,data){await requireRole(['admin']);const d=Object.assign({},data,{nisn:String(data.nisn).trim()});if(!d.nisn||!d.nama)return {success:false,message:'Nama dan NISN wajib diisi.'};await fbSet(fbKey(d.nisn),d);return {success:true,message:'Siswa berhasil ditambahkan.'};}
+async function updateSiswa(token,oldNisn,data){await requireRole(['admin']);const old=String(oldNisn).trim(), d=Object.assign({},data,{nisn:String(data.nisn||old).trim()});if(old!==d.nisn){await fbSet(fbKey(d.nisn),d);await fbRemove(fbKey(old));}else await fbSet(fbKey(old),d);return {success:true,message:'Data siswa berhasil diperbarui.'};}
 async function deleteSiswa(token,nisn){await requireRole(['admin']);await fbRemove(`${FB_ROOT}/shared/students/${fbKey(nisn)}`);return {success:true,message:'Data siswa berhasil dihapus.'};}
 
 async function getHariLibur(){await requireUser();const h=(await fbGet(`${FB_ROOT}/shared/holidays`))||{};return {success:true,data:Object.values(h).sort((a,b)=>String(b.tanggal).localeCompare(String(a.tanggal)))};}
@@ -331,7 +352,7 @@ async function addKelas(nama){await requireRole(['admin']);return {success:true,
 async function updateKelas(rowIndex,namaBaru){await requireRole(['admin']);return {success:true,message:'Nama kelas dikelola melalui data siswa.'};}
 async function deleteKelas(rowIndex,namaKelas){await requireRole(['admin']);const students=await getStudents();if(Object.values(students).some(s=>String(s.kelas||'')===String(namaKelas)))return {success:false,message:'Kelas tidak bisa dihapus karena masih ada siswa terdaftar.'};return {success:true,message:'Kelas sudah tidak digunakan.'};}
 
-async function importSiswaBulk(rows){await requireRole(['admin']);const updates={};let added=0,skipped=0;for(const d of rows||[]){const n=String(d.nisn||'').trim();if(!n){skipped++;continue;}updates[`${FB_ROOT}/shared/students/${fbKey(n)}`]=Object.assign({},d,{nisn:n});added++;}if(Object.keys(updates).length)await fbUpdate(updates);return {success:true,added,skipped};}
+async function importSiswaBulk(rows){await requireRole(['admin']);const updates={};let added=0,skipped=0;for(const d of rows||[]){const n=String(d.nisn||'').trim();if(!n){skipped++;continue;}updates[fbKey(n)]=Object.assign({},d,{nisn:n});added++;}if(Object.keys(updates).length)await fbUpdate(updates);return {success:true,added,skipped};}
 async function importGuruBulk(rows){await requireRole(['admin']);let added=0,skipped=0;const updates={};for(const d of rows||[]){const id=String(d.idGuru||d.username||'').trim();if(!id){skipped++;continue;}updates[`${FB_ROOT}/shared/teachers/${fbKey(id)}`]=d;added++;}if(Object.keys(updates).length)await fbUpdate(updates);return {success:true,added,skipped};}
 async function importHariLiburBulk(rows){await requireRole(['admin','guru']);const updates={};for(const d of rows||[]){const t=String(d.tanggal||'').trim();if(t)updates[`${FB_ROOT}/shared/holidays/${fbKey(t)}`]={tanggal:t,keterangan:d.keterangan||''};}await fbUpdate(updates);return {success:true,added:Object.keys(updates).length,skipped:0};}
 
@@ -365,8 +386,8 @@ function downloadBlob(name,blob){const u=URL.createObjectURL(blob);window.open(u
 async function generateExcel(type,filters={}){await requireUser();if(!window.XLSX)throw new Error('SheetJS belum dimuat.');let rows=[];if(type.includes('absensi')){const r=await getAbsensiList({kelas:filters.kelas||'',tanggalMulai:filters.tanggalMulai||filters.startDate||todayWIB(),tanggalAkhir:filters.tanggalAkhir||filters.endDate||todayWIB()});rows=r.data||[];}else if(type==='monitoring'){rows=(await getMonitoringRealtime(filters.kelas||'')).data||[];}else rows=(await getAbsensiList({kelas:filters.kelas||'',tanggalMulai:filters.tanggalMulai||todayWIB(),tanggalAkhir:filters.tanggalAkhir||todayWIB()})).data||[];const ws=XLSX.utils.json_to_sheet(rows),wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Data');const blob=new Blob([XLSX.write(wb,{bookType:'xlsx',type:'array'})],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});const url=downloadBlob(`Laporan_${type}_${todayWIB()}.xlsx`,blob);return {success:true,url};}
 async function getTemplateExcel(type){if(!window.XLSX)throw new Error('SheetJS belum dimuat.');const headers=type.toLowerCase().includes('guru')?['ID Guru','Nama','Jabatan','Mata Pelajaran','Kelas','Username','Password']:type.toLowerCase().includes('libur')?['Tanggal','Keterangan']:['Nama Lengkap','NISN','Jenis Kelamin','Tanggal Lahir','Agama','Nama Ayah','Nama Ibu','No Handphone','Kelas','Alamat'];const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([headers]),'Template');const blob=new Blob([XLSX.write(wb,{bookType:'xlsx',type:'array'})],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});return {success:true,url:downloadBlob(`Template_${type}.xlsx`,blob)};}
 
-async function processIndividualPromotion(kelasAsal,kelasTujuan,promoData){await requireRole(['admin']);if(kelasTujuan==='LULUS')return {success:false,message:'Promosi LULUS memerlukan node alumni dan belum tersedia pada Firebase Rules yang diberikan.'};const students=await getStudents(),updates={};for(const p of promoData||[]){const n=String(p?.nisn||'').trim();if(n&&students[n])updates[`${FB_ROOT}/shared/students/${fbKey(n)}/kelas`]=kelasTujuan;}if(Object.keys(updates).length)await fbUpdate(updates);return {success:true,movedCount:Object.keys(updates).length};}
-async function processGradePromotion(mapping){await requireRole(['admin']);const students=await getStudents(),updates={};for(const s of Object.values(students)){const target=(mapping||[]).find(m=>String(m.asal)===String(s.kelas))?.tujuan;if(target&&target!=='LULUS')updates[`${FB_ROOT}/shared/students/${fbKey(s.nisn)}/kelas`]=target;}if(Object.keys(updates).length)await fbUpdate(updates);return {success:true,movedCount:Object.keys(updates).length};}
+async function processIndividualPromotion(kelasAsal,kelasTujuan,promoData){await requireRole(['admin']);if(kelasTujuan==='LULUS')return {success:false,message:'Promosi LULUS memerlukan node alumni dan belum tersedia pada Firebase Rules yang diberikan.'};const students=await getStudents(),updates={};for(const p of promoData||[]){const n=String(p?.nisn||'').trim();if(n&&students[n])updates[`${fbKey(n)}/kelas`]=kelasTujuan;}if(Object.keys(updates).length)await fbUpdate(updates);return {success:true,movedCount:Object.keys(updates).length};}
+async function processGradePromotion(mapping){await requireRole(['admin']);const students=await getStudents(),updates={};for(const s of Object.values(students)){const target=(mapping||[]).find(m=>String(m.asal)===String(s.kelas))?.tujuan;if(target&&target!=='LULUS')updates[`${fbKey(s.nisn)}/kelas`]=target;}if(Object.keys(updates).length)await fbUpdate(updates);return {success:true,movedCount:Object.keys(updates).length};}
 async function archiveAndResetYear(name){await requireRole(['admin']);const data={exportedAt:new Date().toISOString(),schoolId:SCHOOL_ID,students:await getStudents(),attendance:await getAttendance()};const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});const url=downloadBlob(`${name||'Arsip_'+todayWIB()}.json`,blob);await fbRemove(`${FB_ROOT}/apps/absensi_siswa/attendance`);return {success:true,url,message:'Arsip Firebase diunduh dan data absensi aktif dikosongkan.'};}
 async function archiveAndReset(name){return archiveAndResetYear(name);}
 
