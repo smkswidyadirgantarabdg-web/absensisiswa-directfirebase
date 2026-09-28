@@ -79,7 +79,7 @@
 /*
  * DIRECT FIREBASE BENCHMARK
  * Runtime path: GitHub Pages -> Firebase Web SDK -> Firebase RTDB.
- * No Apps Script endpoint, no firebaseRun, no service-account key.
+ * No Apps Script endpoint, no GAS API endpoint, no service-account key.
  * The application UI/business flow below remains based on the original file.
  */
 const firebaseConfig = {
@@ -153,14 +153,68 @@ function attendanceKey(date,nisn){return fbKey(`${date}_${nisn}`);}
 function profileResult(profile,u){return {success:true,token:u.uid||'',role:String(profile.role||'').toLowerCase(),username:profile.username||profile.identifier||'',nama:profile.nama||profile.namaGuru||profile.username||'',kelas:profile.kelas||'',nisn:String(profile.role||'').toLowerCase()==='siswa'?(profile.identifier||profile.username):null};}
 
 async function directLogin(username,password,nisn){
+  await __fbReady;
+  const {signInWithEmailAndPassword,createUserWithEmailAndPassword}=__fb;
+
+  // Siswa tetap login NISN saja, sesuai alur UI lama.
+  // Untuk benchmark direct-Firebase ini, NISN dipakai sebagai identitas sekaligus
+  // password internal akun Auth sintetis. Tidak ada custom claim yang diperlukan.
   if(nisn){
-    /* The production UI uses NISN-only student login. Firebase Rules require an
-       authenticated student with a matching identifier custom claim. A browser
-       cannot mint that claim, so do not weaken Rules or invent a password. */
-    return {success:false,message:'Login siswa langsung Firebase memerlukan akun Firebase Authentication siswa dengan identifier claim yang sesuai. Akun siswa belum diprovision pada data migrasi ini.'};
+    const id=String(nisn).trim();
+    if(!/^\d{6,20}$/.test(id)) return {success:false,message:'NISN tidak valid.'};
+
+    const student=await fbGet(`${FB_ROOT}/shared/students/${fbKey(id)}`);
+    if(!student) return {success:false,message:'NISN tidak terdaftar di database siswa.'};
+
+    const email=`${id}@siswa.smkwd.local`;
+    let cred=null;
+    try{
+      cred=await signInWithEmailAndPassword(__fb.auth,email,id);
+    }catch(signErr){
+      try{
+        cred=await createUserWithEmailAndPassword(__fb.auth,email,id);
+      }catch(createErr){
+        return {success:false,message:'Login siswa gagal. Periksa koneksi Firebase atau akun siswa.'};
+      }
+    }
+
+    const uid=cred.user.uid;
+    const profilePath=`${FB_ROOT}/security/users/${fbKey(uid)}`;
+    let profile=await fbGet(profilePath);
+    if(!profile){
+      profile={
+        uid,
+        username:id,
+        identifier:id,
+        nisn:id,
+        role:'siswa',
+        entityType:'siswa',
+        active:true,
+        nama:student.nama||'',
+        kelas:student.kelas||''
+      };
+      await fbSet(profilePath,profile);
+    }else if(profile.active!==true){
+      return {success:false,message:'Akun siswa tidak aktif.'};
+    }else{
+      await fbUpdate({
+        [`${profilePath}/identifier`]:id,
+        [`${profilePath}/nisn`]:id,
+        [`${profilePath}/nama`]:student.nama||profile.nama||'',
+        [`${profilePath}/kelas`]:student.kelas||profile.kelas||''
+      });
+      profile={...profile,identifier:id,nisn:id,nama:student.nama||profile.nama||'',kelas:student.kelas||profile.kelas||''};
+    }
+    const result=profileResult(profile,cred.user);
+    result.username=id;
+    result.nisn=id;
+    result.nama=student.nama||profile.nama||'';
+    result.kelas=student.kelas||profile.kelas||'';
+    result.token=await cred.user.getIdToken();
+    return result;
   }
+
   if(!username||!password)return {success:false,message:'Username atau password salah'};
-  const {signInWithEmailAndPassword}=__fb;
   const safe=String(username).trim().toLowerCase().replace(/[^a-z0-9._-]/g,'_');
   let lastError;
   for(const type of ['admin','guru','piket']){
@@ -168,12 +222,13 @@ async function directLogin(username,password,nisn){
       const cred=await signInWithEmailAndPassword(__fb.auth,`${safe}@${type}.smkwd.local`,String(password));
       const prof=await fbGet(`${FB_ROOT}/security/users/${fbKey(cred.user.uid)}`);
       if(!prof || prof.active!==true) throw new Error('Profil akses tidak aktif.');
+      const role=String(prof.role||'').toLowerCase();
+      if(!['admin','guru','wakel'].includes(role)) throw new Error('Role tidak diizinkan pada aplikasi ini.');
       const result=profileResult(prof,cred.user); result.token=await cred.user.getIdToken(); return result;
     }catch(e){lastError=e;}
   }
   return {success:false,message:'Username atau password salah'};
 }
-
 async function lookupSiswaForScan(nisn){const s=(await getStudents())[String(nisn).trim()];return s?{success:true,nama:s.nama,nisn:s.nisn,kelas:s.kelas}:{success:false,message:'NISN tidak terdaftar di database.'};}
 
 async function batchScanAbsensi(nisnList,scannerRole,scannerKelas){
@@ -2208,28 +2263,40 @@ function processTableData(type) {
     // ==========================================================================
     // 2. SESSION MANAGEMENT
     // ==========================================================================
-    function checkSession() {
-        const storedSession = localStorage.getItem('absensiAppSession');
-        if (storedSession) {
-            try {
-                const sessionData = JSON.parse(storedSession);
-                if (sessionData && sessionData.success) {
-                    currentUser = sessionData;
-                    document.getElementById('loginPage').classList.add('hidden');
-                    document.getElementById('dashboardContainer').classList.remove('hidden');
-                    
-                    if (window.innerWidth < 768) {
-                         document.getElementById('sidebar').classList.add('-translate-x-full');
-                    }
-                    
-                    initDashboard();
-                }
-            } catch (e) {
+    async function checkSession() {
+        try {
+            await __fbReady;
+            const authUser = __fb.auth.currentUser;
+            const storedSession = localStorage.getItem('absensiAppSession');
+            if (!authUser || !storedSession) return;
+
+            const sessionData = JSON.parse(storedSession);
+            if (!sessionData || !sessionData.success) {
                 localStorage.removeItem('absensiAppSession');
+                return;
             }
+
+            const profile = await fbGet(`${FB_ROOT}/security/users/${fbKey(authUser.uid)}`);
+            if (!profile || profile.active !== true) {
+                localStorage.removeItem('absensiAppSession');
+                return;
+            }
+
+            currentUser = profileResult(profile, authUser);
+            currentUser.token = await authUser.getIdToken();
+            localStorage.setItem('absensiAppSession', JSON.stringify(currentUser));
+            document.getElementById('loginPage').classList.add('hidden');
+            document.getElementById('dashboardContainer').classList.remove('hidden');
+
+            if (window.innerWidth < 768) {
+                document.getElementById('sidebar').classList.add('-translate-x-full');
+            }
+            initDashboard();
+        } catch (e) {
+            console.warn('Session Firebase tidak dapat dipulihkan:', e);
+            localStorage.removeItem('absensiAppSession');
         }
     }
-
     // ==========================================================================
     // 3. UI NAVIGATION & SIDEBAR
     // ==========================================================================
