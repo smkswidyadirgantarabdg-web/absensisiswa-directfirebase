@@ -102,7 +102,12 @@ let __fbReadyResolve;
 let __fbReadyReject;
 const __fbReady = new Promise((resolve,reject)=>{__fbReadyResolve=resolve;__fbReadyReject=reject;});
 
-function fbErr(e){ return e && (e.message || e.code || String(e)) || 'Kesalahan Firebase'; }
+function fbErr(e){
+  if(!e) return 'Kesalahan Firebase tidak diketahui.';
+  const code=e.code ? String(e.code) : '';
+  const message=e.message ? String(e.message) : String(e);
+  return code ? `[${code}] ${message}` : message;
+}
 function fbKey(v){ return String(v ?? '').trim().replace(/[.#$\/\[\]]/g,'_') || '_'; }
 function pad2(v){ return String(v).padStart(2,'0'); }
 function nowParts(){
@@ -163,18 +168,29 @@ async function directLogin(username,password,nisn){
     const id=String(nisn).trim();
     if(!/^\d{6,20}$/.test(id)) return {success:false,message:'NISN tidak valid.'};
 
-    const student=await fbGet(`${FB_ROOT}/shared/students/${fbKey(id)}`);
-    if(!student) return {success:false,message:'NISN tidak terdaftar di database siswa.'};
+    let student;
+    try{
+      student=await fbGet(`${FB_ROOT}/shared/students/${fbKey(id)}`);
+    }catch(e){
+      return {success:false,message:`Tidak dapat membaca data siswa dari Firebase: ${fbErr(e)}`};
+    }
+    if(!student) return {success:false,message:`NISN ${id} tidak terdaftar di database siswa.`};
 
     const email=`${id}@siswa.smkwd.local`;
     let cred=null;
     try{
       cred=await signInWithEmailAndPassword(__fb.auth,email,id);
     }catch(signErr){
-      try{
-        cred=await createUserWithEmailAndPassword(__fb.auth,email,id);
-      }catch(createErr){
-        return {success:false,message:'Login siswa gagal. Periksa koneksi Firebase atau akun siswa.'};
+      const signCode=signErr?.code||'';
+      // Hanya membuat akun baru bila akun Auth memang belum ada.
+      if(signCode==='auth/user-not-found'){
+        try{
+          cred=await createUserWithEmailAndPassword(__fb.auth,email,id);
+        }catch(createErr){
+          return {success:false,message:`Akun Firebase siswa belum dapat dibuat: ${fbErr(createErr)}`};
+        }
+      }else{
+        return {success:false,message:`Login siswa gagal: ${fbErr(signErr)}`};
       }
     }
 
@@ -216,18 +232,22 @@ async function directLogin(username,password,nisn){
 
   if(!username||!password)return {success:false,message:'Username atau password salah'};
   const safe=String(username).trim().toLowerCase().replace(/[^a-z0-9._-]/g,'_');
-  let lastError;
+  let lastError=null;
+  let lastCode='';
   for(const type of ['admin','guru','piket']){
     try{
       const cred=await signInWithEmailAndPassword(__fb.auth,`${safe}@${type}.smkwd.local`,String(password));
       const prof=await fbGet(`${FB_ROOT}/security/users/${fbKey(cred.user.uid)}`);
-      if(!prof || prof.active!==true) throw new Error('Profil akses tidak aktif.');
+      if(!prof || prof.active!==true) throw new Error('Profil akses tidak aktif atau belum dibuat di security/users.');
       const role=String(prof.role||'').toLowerCase();
-      if(!['admin','guru','wakel'].includes(role)) throw new Error('Role tidak diizinkan pada aplikasi ini.');
+      if(!['admin','guru','wakel'].includes(role)) throw new Error(`Role "${role||'-'}" tidak diizinkan pada aplikasi ini.`);
       const result=profileResult(prof,cred.user); result.token=await cred.user.getIdToken(); return result;
-    }catch(e){lastError=e;}
+    }catch(e){lastError=e;lastCode=e?.code||'';}
   }
-  return {success:false,message:'Username atau password salah'};
+  if(lastCode==='auth/invalid-credential' || lastCode==='auth/wrong-password' || lastCode==='auth/user-not-found'){
+    return {success:false,message:`Login gagal: username/password Firebase tidak cocok. Akun Authentication untuk "${username}" harus sudah tersedia.`};
+  }
+  return {success:false,message:`Login gagal: ${fbErr(lastError)}`};
 }
 async function lookupSiswaForScan(nisn){const s=(await getStudents())[String(nisn).trim()];return s?{success:true,nama:s.nama,nisn:s.nisn,kelas:s.kelas}:{success:false,message:'NISN tidak terdaftar di database.'};}
 
@@ -2482,7 +2502,19 @@ function processTableData(type) {
 
     function onLoginFailure(error) {
         hideLoading();
-        alert('Gagal terhubung ke server: ' + error.message);
+        const message = typeof error === 'string'
+            ? error
+            : (error?.message || error?.code || String(error || 'Kesalahan tidak diketahui'));
+        const errorDiv = document.getElementById('loginError');
+        const errorText = document.getElementById('errorText');
+        if (errorText) errorText.textContent = 'Firebase: ' + message;
+        if (errorDiv) {
+            errorDiv.classList.remove('hidden');
+            setTimeout(() => errorDiv.classList.add('hidden'), 10000);
+        } else {
+            alert('Firebase: ' + message);
+        }
+        console.error('Login Firebase gagal:', error);
     }
 
     function logout() {
