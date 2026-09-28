@@ -244,22 +244,80 @@ async function directLogin(username,password,nisn){
     return result;
   }
 
-  if(!username||!password)return {success:false,message:'Username atau password salah'};
+  if(!username||!password)return {success:false,message:'Username dan password wajib diisi.'};
   const safe=String(username).trim().toLowerCase().replace(/[^a-z0-9._-]/g,'_');
+
+  // MODE ADMIN: hanya mencoba akun Admin. Tidak lagi mencoba guru/piket secara
+  // berurutan, karena kegagalan pembacaan profil Admin sebelumnya dapat tertutup
+  // oleh error akun guru/piket dan akhirnya salah dilaporkan sebagai password salah.
+  if(currentLoginTab === 'admin'){
+    const email=`${safe}@admin.smkwd.local`;
+    try{
+      const cred=await signInWithEmailAndPassword(__fb.auth,email,String(password));
+      const uid=cred.user.uid;
+      let prof;
+      try{
+        prof=await fbGet(`${FB_ROOT}/security/users/${fbKey(uid)}`);
+      }catch(e){
+        return {success:false,message:`LOGIN ADMIN BERHASIL, tetapi profil Admin tidak dapat dibaca dari Firebase.
+Email: ${email}
+UID: ${uid}
+Error: ${fbErr(e)}`};
+      }
+      if(!prof){
+        return {success:false,message:`LOGIN ADMIN BERHASIL, tetapi profil belum ditemukan.
+Email: ${email}
+UID: ${uid}
+Lokasi yang dicari: ${FB_ROOT}/security/users/${fbKey(uid)}`};
+      }
+      if(prof.active!==true){
+        return {success:false,message:`Akun Admin berhasil login ke Firebase Authentication, tetapi profil tidak aktif.
+Email: ${email}
+UID: ${uid}
+Nilai active: ${JSON.stringify(prof.active)}`};
+      }
+      const role=String(prof.role||'').toLowerCase();
+      if(role!=='admin'){
+        return {success:false,message:`Akun berhasil login, tetapi role bukan admin.
+Email: ${email}
+UID: ${uid}
+Role terbaca: ${role||'(kosong)'}`};
+      }
+      const result=profileResult(prof,cred.user);
+      result.token=await cred.user.getIdToken();
+      return result;
+    }catch(e){
+      const code=String(e?.code||'');
+      let explanation=fbErr(e);
+      if(code==='auth/invalid-credential' || code==='auth/wrong-password'){
+        explanation=`Email/password Firebase tidak cocok untuk akun Admin.`;
+      }else if(code==='auth/user-not-found'){
+        explanation=`Akun Authentication belum ditemukan.`;
+      }else if(code==='auth/operation-not-allowed'){
+        explanation=`Provider Email/Password belum diaktifkan di Firebase Authentication.`;
+      }else if(code==='auth/too-many-requests'){
+        explanation=`Firebase sementara membatasi percobaan login karena terlalu banyak percobaan.`;
+      }
+      return {success:false,message:`LOGIN ADMIN GAGAL
+Email yang dicoba: ${email}
+Kode: ${code||'-'}
+Keterangan: ${explanation}`};
+    }
+  }
+
+  // Mode non-Admin tetap menggunakan mekanisme lama untuk Guru/Piket.
   let lastError=null;
   let lastCode='';
-  for(const type of ['admin','guru','piket']){
+  for(const type of ['guru','piket']){
     try{
-      const cred=await signInWithEmailAndPassword(__fb.auth,`${safe}@${type}.smkwd.local`,String(password));
+      const email=`${safe}@${type}.smkwd.local`;
+      const cred=await signInWithEmailAndPassword(__fb.auth,email,String(password));
       const prof=await fbGet(`${FB_ROOT}/security/users/${fbKey(cred.user.uid)}`);
       if(!prof || prof.active!==true) throw new Error('Profil akses tidak aktif atau belum dibuat di security/users.');
       const role=String(prof.role||'').toLowerCase();
-      if(!['admin','guru','wakel'].includes(role)) throw new Error(`Role "${role||'-'}" tidak diizinkan pada aplikasi ini.`);
+      if(!['guru','wakel'].includes(role)) throw new Error(`Role "${role||'-'}" tidak diizinkan pada aplikasi ini.`);
       const result=profileResult(prof,cred.user); result.token=await cred.user.getIdToken(); return result;
     }catch(e){lastError=e;lastCode=e?.code||'';}
-  }
-  if(lastCode==='auth/invalid-credential' || lastCode==='auth/wrong-password' || lastCode==='auth/user-not-found'){
-    return {success:false,message:`Login gagal: username/password Firebase tidak cocok. Akun Authentication untuk "${username}" harus sudah tersedia.`};
   }
   return {success:false,message:`Login gagal: ${fbErr(lastError)}`};
 }
